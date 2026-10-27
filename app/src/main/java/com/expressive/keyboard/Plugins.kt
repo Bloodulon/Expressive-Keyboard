@@ -206,7 +206,9 @@ data class KeyboardPlugin(
     val languages: List<KeyboardLanguage> = emptyList(),
     /** Дополнительные слова для подсказок: язык → слова. */
     val dictionary: Map<String, List<String>> = emptyMap(),
-    val enabledByDefault: Boolean = true
+    val enabledByDefault: Boolean = true,
+    /** Исходный JSON оформления: из него собираются варианты по настройкам темы. */
+    val skinJson: String? = null
 ) {
     val usesNetwork: Boolean get() = "network" in permissions && (actions.any { it.type == PluginActionType.HTTP } || script != null)
     /** Есть что применить кнопкой «Применить оформление». */
@@ -426,7 +428,8 @@ object PluginParser {
             icons = icons,
             languages = languages,
             dictionary = dictionary,
-            enabledByDefault = o.optBoolean("enabledByDefault", true)
+            enabledByDefault = o.optBoolean("enabledByDefault", true),
+            skinJson = o.optJSONObject("skin")?.toString()
         )
     }
 
@@ -779,9 +782,23 @@ object PluginRepository {
         layouts = lay
     }
 
-    /** Оформление, выбранное в настройках, если его плагин включён. */
+    /** Оформление, выбранное в настройках, если его плагин включён (без настроек темы и акцента). */
     fun activeSkin(settings: KeyboardSettings): KeyboardSkin? = ScriptHost.skinOverride
         ?: if (settings.skinPlugin.isEmpty()) null else active.firstOrNull { it.id == settings.skinPlugin }?.skin
+
+    /** Плагин выбранного оформления. */
+    fun skinPlugin(settings: KeyboardSettings): KeyboardPlugin? =
+        if (settings.skinPlugin.isEmpty()) null else active.firstOrNull { it.id == settings.skinPlugin && it.skin != null }
+
+    /** Оформление для клавиатуры: светлое или тёмное, с настройками темы и в акцентном цвете пользователя. */
+    fun resolvedSkin(settings: KeyboardSettings, dark: Boolean): KeyboardSkin? {
+        ScriptHost.skinOverride?.let { o ->
+            val m = o.forMode(dark)
+            return if (settings.userAccent != 0) ThemeOptions.recolor(m, androidx.compose.ui.graphics.Color(settings.userAccent), settings.colorAccentText) else m
+        }
+        val p = skinPlugin(settings) ?: return null
+        return ThemeOptions.resolve(p, settings, dark)
+    }
 
     /** Тема + настройки + оформление одной кнопкой. */
     fun applyLook(context: Context, p: KeyboardPlugin) {

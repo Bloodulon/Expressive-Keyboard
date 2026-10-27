@@ -40,8 +40,15 @@ class KeyboardLanguage(
     /** Пробелы между словами не ставятся (тайский) — автоисправление по пробелу бессмысленно. */
     val autoCorrect: Boolean = true,
     val rtl: Boolean = false,
-    val fromPlugin: String? = null
+    val fromPlugin: String? = null,
+    /** Ряды заменены своей раскладкой из настроек. */
+    val customLayout: Boolean = false
 ) {
+    /** Тот же язык (словарь, голос, перевод) с другими рядами букв. */
+    fun withRows(newRows: List<List<String>>): KeyboardLanguage = KeyboardLanguage(
+        id, label, spaceLabel, title, locale, newRows, shiftMap, accents, dict, hasCase, composer, autoCorrect, rtl, fromPlugin, true
+    )
+
     override fun equals(other: Any?): Boolean = other is KeyboardLanguage && other.id == id && other.fromPlugin == fromPlugin
     override fun hashCode(): Int = id.hashCode()
     override fun toString(): String = id
@@ -273,11 +280,66 @@ object Languages {
 
     val all: List<KeyboardLanguage> get() = builtIn + extra.filter { e -> builtIn.none { it.id == e.id } }
 
-    fun byId(id: String): KeyboardLanguage? = extra.firstOrNull { it.id == id } ?: builtIn.firstOrNull { it.id == id }
+    fun byId(id: String): KeyboardLanguage? = (extra.firstOrNull { it.id == id } ?: builtIn.firstOrNull { it.id == id })?.let(::withUser)
 
-    fun enabled(settings: KeyboardSettings): List<KeyboardLanguage> =
-        settings.languages.split(',').map { it.trim() }.filter { it.isNotEmpty() }.distinct().mapNotNull(::byId)
-            .ifEmpty { listOf(RU, EN) }
+    /** Язык без своей раскладки — как он задан в приложении или плагине. */
+    fun original(id: String): KeyboardLanguage? = extra.firstOrNull { it.id == id } ?: builtIn.firstOrNull { it.id == id }
+
+    fun enabled(settings: KeyboardSettings): List<KeyboardLanguage> {
+        applyUserLayouts(settings.langLayouts)
+        return settings.languages.split(',').map { it.trim() }.filter { it.isNotEmpty() }.distinct().mapNotNull(::byId)
+            .ifEmpty { listOf(RU, EN).map(::withUser) }
+    }
+
+    // ------------------------------------------------------------------ свои раскладки
+
+    @Volatile private var userRaw = ""
+    /** Код языка → ряды своей раскладки (настройка "lang_layouts"). */
+    @Volatile var userRows: Map<String, List<List<String>>> = emptyMap()
+        private set
+    private val userCache = java.util.concurrent.ConcurrentHashMap<String, KeyboardLanguage>()
+
+    fun applyUserLayouts(raw: String) {
+        if (raw == userRaw) return
+        userRows = parseUserLayouts(raw)
+        userCache.clear()
+        userRaw = raw
+    }
+
+    fun parseUserLayouts(raw: String): Map<String, List<List<String>>> = runCatching {
+        if (raw.isBlank()) return emptyMap()
+        val o = JSONObject(raw)
+        o.keys().asSequence().associateWith { k ->
+            val a = o.getJSONArray(k)
+            (0 until a.length()).map { r(a.getString(it).trim()) }.filter { it.isNotEmpty() }
+        }.filterValues { it.isNotEmpty() }
+    }.getOrDefault(emptyMap())
+
+    /** Язык со своей раскладкой, если она задана; иначе он сам. */
+    fun withUser(lang: KeyboardLanguage): KeyboardLanguage {
+        val base = if (lang.customLayout) original(lang.id) ?: lang else lang
+        val rows = userRows[base.id] ?: return base
+        return userCache.getOrPut(base.id) { base.withRows(rows) }
+    }
+
+    /** Ряд текстом: «qwerty» — по символу, «sh ch q» (с пробелами) — по клавишам. */
+    fun rowToText(row: List<String>): String = if (row.all { it.length == 1 }) row.joinToString("") else row.joinToString(" ")
+
+    fun parseRowText(text: String): List<String> = r(text.trim())
+
+    /** Готовые раскладки: известные латинские и кириллические и раскладки всех языков. */
+    val presets: List<Pair<String, List<String>>> by lazy {
+        listOf(
+            "QWERTY" to QWERTY,
+            "QWERTZ" to QWERTZ,
+            "AZERTY" to listOf("azertyuiop", "qsdfghjklm", "wxcvbn"),
+            "Colemak" to listOf("qwfpgjluy", "arstdhneio", "zxcvbkm"),
+            "Dvorak" to listOf("pyfgcrl", "aoeuidhtns", "qjkxbmwvz"),
+            "ЙЦУКЕН" to listOf(RU_ROWS_1, RU_ROWS_2, RU_ROWS_3),
+            "ЙЦУКЕН + ё ъ" to listOf(RU_ROWS_1 + "ъ", RU_ROWS_2, RU_ROWS_3 + "ё"),
+            "ЯВЕРТЫ (фонетическая)" to listOf("явертыуиопшщ", "асдфгчйклэю", "зьцжбнмх")
+        )
+    }
 
     /** Язык из плагина: { "id", "name", "label", "locale", "rows": ["...", ...], "shift": {..}, "variants": {..} }. */
     fun parse(o: JSONObject, pluginId: String): KeyboardLanguage {

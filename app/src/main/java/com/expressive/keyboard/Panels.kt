@@ -939,3 +939,69 @@ internal fun ScriptNode(n: UiNode, palette: KeyPalette, font: FontFamily, onClic
         is UiNode.Error -> Text("⚠ ${n.message}", color = palette.accent, fontFamily = font, fontSize = 13.sp)
     }
 }
+
+/**
+ * Панель ИИ над клавиатурой (как инструменты письма Gboard в PixelBoard): исправить, тон, короче, эмодзи, дописать
+ * и своё указание. Работает с выделением или со всем текстом поля; последнюю правку можно отменить.
+ */
+@Composable
+internal fun AiWriteBar(state: KeyboardState, actions: KeyboardActions, palette: KeyPalette, font: FontFamily) {
+    if (state.panel == ActivePanel.AI_PROMPT) {
+        val prompt = state.aiPrompt
+        Row(
+            Modifier.fillMaxWidth().panelSurface(palette).padding(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                Modifier.size(40.dp).clip(CircleShape).background(palette.func).clickable { actions.togglePanel(ActivePanel.AI_WRITE) },
+                contentAlignment = Alignment.Center
+            ) { Text("←", color = palette.onFunc, fontFamily = font, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp) }
+            Text(
+                if (prompt.isEmpty()) tr("Что сделать? Например: «ответь вежливо», «переведи на английский»") else prompt,
+                color = if (prompt.isEmpty()) palette.muted else palette.onLetter,
+                fontFamily = font, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            val ready = prompt.isNotBlank()
+            val bg by animateColorAsState(if (ready) palette.accent else palette.func, label = "aiSend")
+            Box(
+                Modifier.size(40.dp).clip(CircleShape).background(bg).clickable(enabled = ready) { actions.aiTool("send") },
+                contentAlignment = Alignment.Center
+            ) { Text("↑", color = if (ready) palette.onAccent else palette.muted, fontFamily = font, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp) }
+        }
+        return
+    }
+    Row(
+        Modifier.fillMaxWidth().panelSurface(palette).horizontalScroll(rememberScrollState()).padding(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        AnimatedVisibility(state.aiCanUndo, enter = fadeIn() + expandHorizontally(), exit = fadeOut() + shrinkHorizontally()) {
+            AiChip("↶", tr("Отменить"), false, true, palette, font) { actions.aiTool("undo") }
+        }
+        for (task in AiTask.TOOLS) {
+            AiChip(task.icon, tr(task.title), state.aiTask == task.id, task == AiTask.PROOFREAD, palette, font) { actions.aiTool(task.id) }
+        }
+        AiChip(AiTask.CUSTOM.icon, tr(AiTask.CUSTOM.title), false, false, palette, font) { actions.aiTool("prompt") }
+    }
+}
+
+@Composable
+private fun AiChip(icon: String, title: String, busy: Boolean, accent: Boolean, palette: KeyPalette, font: FontFamily, onClick: () -> Unit) {
+    // кнопка, над которой думает ИИ, мягко «дышит»
+    val pulse = if (busy) {
+        rememberInfiniteTransition(label = "aiChip").animateFloat(0.55f, 1f, infiniteRepeatable(tween(520), RepeatMode.Reverse), label = "aiChipA").value
+    } else 1f
+    val bg = if (accent || busy) palette.accent else palette.func
+    val fg = if (accent || busy) palette.onAccent else palette.onFunc
+    Row(
+        Modifier.clip(CircleShape).background(bg.copy(alpha = bg.alpha * pulse)).clickable(enabled = !busy, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(icon, fontSize = 14.sp, color = fg)
+        Text(if (busy) tr("ИИ думает…") else title, color = fg, fontFamily = font, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp, maxLines = 1)
+    }
+}

@@ -138,6 +138,10 @@ private class Mod(val plugin: KeyboardPlugin) {
     var overlay: List<OverlayItem> = emptyList()
     /** Раскладки, заданные на лету (kb.setLayout). */
     val layouts = HashMap<String, List<KeyRow>>()
+    /** Сколько раз мод не уложился во время: после трёх раз его обработчики отключаются до перезагрузки. */
+    var timeouts = 0
+    /** Время последних запросов kb.http — не больше 20 в минуту. */
+    val httpTimes = ArrayDeque<Long>()
     /** Оформление, заданное на лету (kb.setSkin). */
     var skin: KeyboardSkin? = null
     fun has(p: String) = p in plugin.permissions
@@ -173,6 +177,11 @@ object ScriptHost {
     /** Оформление из kb.setSkin: важнее выбранного в настройках. */
     var skinOverride by mutableStateOf<KeyboardSkin?>(null)
         private set
+    /**
+     * Поле пароля или режим инкогнито: события с набираемым текстом и буфером (key, word, suggest, press,
+     * start, clipboard) модам не приходят — даже с разрешением read_text.
+     */
+    @Volatile var privateMode = false
 
     private const val CALL_BUDGET_MS = 300L
     private const val LOAD_BUDGET_MS = 2000L
@@ -201,7 +210,16 @@ object ScriptHost {
             cx.putThreadLocal(SandboxFactory.DEADLINE, SystemClock.uptimeMillis() + budgetMs)
             Result.success(block(cx))
         } catch (t: Throwable) {
-            if (m != null) log(m.plugin.id, "✕ " + describe(t))
+            if (m != null) {
+                log(m.plugin.id, "✕ " + describe(t))
+                // мод, который трижды подвесил клавиатуру, больше не получает событий и таймеров
+                if (t is ScriptTimeout && ++m.timeouts >= 3 && m.handlers.isNotEmpty()) {
+                    m.handlers.clear()
+                    m.timers.values.forEach(main::removeCallbacks)
+                    m.timers.clear()
+                    log(m.plugin.id, "⏸ " + tr("мод тормозил клавиатуру и отключён до перезапуска"))
+                }
+            }
             Result.failure(t)
         } finally {
             if (before != null) cx.putThreadLocal(SandboxFactory.DEADLINE, before) else cx.removeThreadLocal(SandboxFactory.DEADLINE)
@@ -211,11 +229,35 @@ object ScriptHost {
 
     // ------------------------------------------------------------------ загрузка
 
+    /** Первая загрузка модов ждёт, пока клавиатура покажется: запуск JavaScript не задерживает первый кадр. */
+    private var firstLoad = true
+    /** Первый запуск скриптов отложен: сюда — самый свежий список модов к этому моменту. */
+    private var deferred: Pair<Context, List<KeyboardPlugin>>? = null
+
     fun reload(context: Context, plugins: List<KeyboardPlugin>) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             main.post { reload(context, plugins) }
             return
         }
+        if (deferred != null) {
+            deferred = context to plugins
+            return
+        }
+        if (firstLoad && plugins.any { it.script != null }) {
+            firstLoad = false
+            deferred = context to plugins
+            // скрипты модов запускаются, когда главный поток свободен, — не в момент первых нажатий
+            main.postDelayed({
+                Looper.myQueue().addIdleHandler {
+                    val d = deferred
+                    deferred = null
+                    if (d != null) reload(d.first, d.second)
+                    false
+                }
+            }, 1200L)
+            return
+        }
+        firstLoad = false
         appContext = context.applicationContext
         mods.values.forEach { m -> m.timers.values.forEach(main::removeCallbacks) }
         val next = LinkedHashMap<String, Mod>()
@@ -271,7 +313,8 @@ object ScriptHost {
         try {
             for (m in mods.values) {
                 val hs = m.handlers[event] ?: continue
-                if (EVENT_PERMS[event]?.let { !m.has(it) } == true) continue
+                val perm = EVENT_PERMS[event]
+                if (perm != null && (privateMode || !m.has(perm))) continue
                 for (h in hs.toList()) {
                     exec(m, CALL_BUDGET_MS) { cx ->
                         val jsArgs = args.map { toJs(cx, m.scope, it) }.toTypedArray()
@@ -423,15 +466,15 @@ object ScriptHost {
         // --- текст
         def(kb, "commit") { _, a -> b()?.scriptCommit(str(a, 0)); Unit }
         def(kb, "insert") { _, a -> b()?.scriptCommit(str(a, 0)); Unit }
-        def(kb, "deleteBefore") { _, a -> b()?.scriptDelete(num(a, 0, 1.0).toInt().coerceIn(0, 100_000), 0); Unit }
+        def(kb, "deleteBefore") { _, a -> b()?.scriptDelete(num(a, 0, 1.0).toInt().coerceIn(0, 5_000), 0); Unit }
         def(kb, "deleteAfter") { _, a -> b()?.scriptDelete(0, num(a, 0, 1.0).toInt().coerceIn(0, 100_000)); Unit }
         def(kb, "replaceBefore") { _, a ->
             b()?.scriptDelete(num(a, 0, 0.0).toInt().coerceIn(0, 100_000), 0)
             b()?.scriptCommit(str(a, 1))
             Unit
         }
-        def(kb, "textBefore") { _, a -> need(m, "read_text"); b()?.scriptTextBefore(num(a, 0, 200.0).toInt().coerceIn(0, 20_000)).orEmpty() }
-        def(kb, "textAfter") { _, a -> need(m, "read_text"); b()?.scriptTextAfter(num(a, 0, 200.0).toInt().coerceIn(0, 20_000)).orEmpty() }
+        def(kb, "textBefore") { _, a -> need(m, "read_text"); if (privateMode) "" else b()?.scriptTextBefore(num(a, 0, 200.0).toInt().coerceIn(0, 5_000)).orEmpty() }
+        def(kb, "textAfter") { _, a -> need(m, "read_text"); if (privateMode) "" else b()?.scriptTextAfter(num(a, 0, 200.0).toInt().coerceIn(0, 5_000)).orEmpty() }
         def(kb, "selectedText") { _, _ -> need(m, "read_text"); b()?.scriptSelected().orEmpty() }
         def(kb, "currentWord") { _, _ ->
             need(m, "read_text")
@@ -450,7 +493,11 @@ object ScriptHost {
         def(kb, "languages") { _, _ -> Languages.enabled(KeyboardPrefs.current(ctx)).map { it.id } }
         def(kb, "shift") { _, _ -> b()?.scriptShift() ?: "off" }
         def(kb, "setShift") { _, a -> b()?.scriptSetShift(str(a, 0)); Unit }
-        def(kb, "field") { _, _ -> b()?.scriptField() ?: emptyMap<String, Any?>() }
+        // приложение и подсказка поля выдают, где человек печатает (банк, мессенджер) — только с read_text
+        def(kb, "field") { _, _ ->
+            val f = b()?.scriptField() ?: emptyMap<String, Any?>()
+            if (m.has("read_text") && !privateMode) f else f - setOf("package", "hint")
+        }
         def(kb, "openPanel") { _, a -> b()?.scriptOpenPanel(str(a, 0, "keyboard")); Unit }
         def(kb, "closePanel") { _, _ -> b()?.scriptOpenPanel("keyboard"); Unit }
         def(kb, "hide") { _, _ -> b()?.scriptHide(); Unit }
@@ -530,7 +577,8 @@ object ScriptHost {
 
         // --- буфер обмена
         def(kb, "clipboard") { _, _ -> need(m, "clipboard"); b()?.scriptClipboard() ?: emptyList<String>() }
-        def(kb, "copy") { _, a -> b()?.scriptCopy(str(a, 0)); Unit }
+        // запись в буфер обмена — тоже только с разрешением: иначе мод мог бы незаметно подменить скопированное
+        def(kb, "copy") { _, a -> need(m, "clipboard"); b()?.scriptCopy(str(a, 0).take(100_000)); Unit }
 
         // --- иконки
         def(kb, "setIcon") { _, a -> IconStore.setPluginIcon(id, str(a, 0), str(a, 1)); Unit }
@@ -582,6 +630,11 @@ object ScriptHost {
             val cb = a.getOrNull(1) as? JsFunction
             val url = o["url"]?.toString() ?: throw IllegalArgumentException("http: нужно url")
             require(url.startsWith("https://")) { "http: разрешены только https-адреса" }
+            require(!isPrivateHost(url)) { "http: адреса домашней сети и самого телефона недоступны" }
+            val now = SystemClock.uptimeMillis()
+            while (m.httpTimes.isNotEmpty() && now - m.httpTimes.first() > 60_000L) m.httpTimes.removeFirst()
+            require(m.httpTimes.size < 20) { "http: не больше 20 запросов в минуту" }
+            m.httpTimes.addLast(now)
             io.launch {
                 val r = runCatching { httpCall(url, o) }
                 withContext(Dispatchers.Main) {
@@ -629,6 +682,7 @@ object ScriptHost {
         fun timer(a: Array<Any?>, repeat: Boolean): Int {
             val fn = a.getOrNull(0) as? JsFunction ?: throw IllegalArgumentException("нужна функция")
             require(m.timers.size < MAX_TIMERS) { "слишком много таймеров" }
+            require(mods.values.sumOf { it.timers.size } < MAX_TIMERS * 2) { "слишком много таймеров у всех модов вместе" }
             val delay = num(a, 1, 0.0).toLong().coerceIn(if (repeat) 50L else 0L, 24 * 3600_000L)
             val tid = m.nextTimer++
             val r = object : Runnable {
@@ -652,11 +706,24 @@ object ScriptHost {
         ScriptableObject.putProperty(s, "kb", kb)
     }
 
+    /** Роутер, сам телефон, локальная сеть: моды не должны сканировать домашнюю сеть. */
+    internal fun isPrivateHost(url: String): Boolean {
+        val host = runCatching { java.net.URI(url).host }.getOrNull()?.lowercase()?.trim('[', ']') ?: return true
+        if (host == "localhost" || host.endsWith(".local") || host.endsWith(".localhost") || host.endsWith(".internal") || host.endsWith(".lan")) return true
+        val isIpLiteral = host.all { it.isDigit() || it == '.' } || (':' in host && host.all { it.isLetterOrDigit() || it == ':' || it == '.' })
+        if (!isIpLiteral) return false
+        val addr = runCatching { java.net.InetAddress.getByName(host) }.getOrNull() ?: return true
+        return addr.isLoopbackAddress || addr.isSiteLocalAddress || addr.isLinkLocalAddress || addr.isAnyLocalAddress ||
+            addr.isMulticastAddress || (addr is java.net.Inet6Address && (addr.address[0].toInt() and 0xFE) == 0xFC)
+    }
+
     private fun httpCall(url: String, o: Map<String, Any?>): Pair<Int, String> {
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = 10_000
             conn.readTimeout = 15_000
+            // перенаправление могло бы увести запрос в домашнюю сеть в обход проверки адреса
+            conn.instanceFollowRedirects = false
             val method = o["method"]?.toString()?.uppercase() ?: "GET"
             conn.requestMethod = if (method in setOf("GET", "POST", "PUT", "DELETE", "PATCH")) method else "GET"
             conn.setRequestProperty("User-Agent", "ExpressiveKeyboard-Plugin")
