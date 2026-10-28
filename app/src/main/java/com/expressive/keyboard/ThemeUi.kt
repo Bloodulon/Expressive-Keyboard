@@ -628,6 +628,7 @@ internal fun ThemeEditorPage(settings: KeyboardSettings, onNavigate: (SettingsPa
         EChoice(listOf("keyboard"), "font", "Шрифт", listOf("" to "Из настроек", "sans" to "Системный", "pixel" to "Пиксели", "mono" to "Моно", "serif" to "Serif", "cursive" to "Курсив"))
         ESlider(listOf("keyboard"), "corner", "Скругление углов клавиатуры", 0f..48f, "dp")
         EColor(listOf("keyboard"), "trail", "След свайп-набора")
+        EColor(listOf("keyboard"), "edge", "Контур по верхнему краю")
     }
     SettingsSection("Фон") {
         EFill(listOf("keyboard"), "background", "Фон клавиатуры")

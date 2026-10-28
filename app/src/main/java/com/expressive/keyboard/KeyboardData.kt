@@ -682,17 +682,38 @@ object Translator {
      * Перевод через несколько бесплатных адресов по очереди: основной адрес Google у части операторов
      * и в части стран недоступен или отвечает ошибкой на частые запросы — тогда пробуем следующий.
      */
-    suspend fun translate(text: String, from: String, to: String): Result<String> = withContext(Dispatchers.IO) {
+    suspend fun translate(text: String, from: String, to: String, hints: List<String> = emptyList()): Result<String> = withContext(Dispatchers.IO) {
         val clean = text.trim()
         if (clean.isEmpty()) return@withContext Result.success("")
+        val src = if (from == "auto") guessSource(clean, to, hints) else from
         var last: Throwable? = null
         for (attempt in listOf(::viaGtx, ::viaDictExt, ::viaMyMemory)) {
-            val r = runCatching { attempt(clean, from, to) }
+            val r = runCatching { attempt(clean, src, to) }
             val out = r.getOrNull()?.trim()
             if (!out.isNullOrEmpty()) return@withContext Result.success(out)
             last = r.exceptionOrNull() ?: last
         }
         Result.failure(last ?: java.io.IOException("empty translation"))
+    }
+
+    private val CYRILLIC_LANGS = setOf("ru", "uk", "be", "bg", "sr", "mk", "kk", "ky", "tg", "tt", "ba", "mn")
+
+    /**
+     * Язык текста угадываем сами, если по буквам он ясен: короткое слово Google определяет наугад — «попа»
+     * уходила как болгарское («священника») и переводилась как «pop». Кириллица — это язык раскладки
+     * пользователя (из hints), а не любой кириллический язык мира. Не уверены — пусть решает сервис ("auto").
+     */
+    private fun guessSource(text: String, to: String, hints: List<String>): String {
+        val guess = when {
+            text.any { it in 'Ѐ'..'ӿ' } -> when {
+                text.any { it in "іїєґІЇЄҐ" } -> "uk"
+                text.any { it in "ўЎ" } -> "be"
+                else -> hints.firstOrNull { it in CYRILLIC_LANGS && it != "uk" && it != "be" } ?: "ru"
+            }
+            else -> return "auto"
+        }
+        // переводим на тот же язык — значит, текст скорее на другом; пусть определяет сервис
+        return if (guess == to) "auto" else guess
     }
 
     private fun open(url: String): HttpURLConnection = (URL(url).openConnection() as HttpURLConnection).apply {

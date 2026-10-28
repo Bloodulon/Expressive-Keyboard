@@ -188,6 +188,8 @@ data class KeyboardSettings(
     val colorAccent: Int = 0,
     val colorAccentText: Int = 0,
     val keyOpacity: Float = 1f,
+    /** Прозрачность фона клавиатуры: 0 — обычный фон, 1 — фона нет, видно только клавиши. */
+    val bgTransparency: Float = 0f,
     // --- фон ---
     val bgImageVersion: Long = 0L,
     val bgDim: Float = 0.35f,
@@ -391,10 +393,10 @@ object KeyboardPrefs {
         val font = p.getString("font_style", "ROUNDED")
         return KeyboardSettings(
             themeMode = p.getString("theme_mode", "SYSTEM") ?: "SYSTEM",
-            keyHeightDp = p.getFloat("key_height_dp", 54f).coerceIn(44f, 68f),
+            keyHeightDp = p.getFloat("key_height_dp", 54f).coerceIn(32f, 68f),
             cornerRadiusDp = p.getFloat("corner_radius_dp", 16f).coerceIn(6f, 30f),
             keySpacingDp = p.getFloat("key_spacing_dp", 5f).coerceIn(2f, 8f),
-            rowSpacingDp = p.getFloat("row_spacing_dp", 8f).coerceIn(4f, 12f),
+            rowSpacingDp = p.getFloat("row_spacing_dp", 8f).coerceIn(2f, 12f),
             bottomOffsetDp = p.getFloat("bottom_offset_dp", 8f).coerceIn(0f, 64f),
             shapePreset = p.getString("accent_shape_preset", ExpressiveShapePreset.COOKIE_12.id)
                 ?: ExpressiveShapePreset.COOKIE_12.id,
@@ -427,6 +429,7 @@ object KeyboardPrefs {
             colorAccent = p.getInt("color_accent", 0),
             colorAccentText = p.getInt("color_accent_text", 0),
             keyOpacity = p.getFloat("key_opacity", 1f).coerceIn(0.2f, 1f),
+            bgTransparency = p.getFloat("bg_transparency", 0f).coerceIn(0f, 1f),
             bgImageVersion = p.getLong("bg_image_version", 0L),
             bgDim = p.getFloat("bg_dim", 0.35f).coerceIn(0f, 0.9f),
             bgBlurDp = p.getFloat("bg_blur_dp", 0f).coerceIn(0f, 24f),
@@ -524,7 +527,7 @@ object KeyboardPrefs {
     val KEY_TYPES: Map<String, Char> = buildMap {
         listOf(
             "key_height_dp", "corner_radius_dp", "key_spacing_dp", "row_spacing_dp", "bottom_offset_dp",
-            "wave_amplitude_percent", "vibration_ms", "vibration_amplitude", "long_press_ms", "key_opacity", "bg_dim",
+            "wave_amplitude_percent", "vibration_ms", "vibration_amplitude", "long_press_ms", "key_opacity", "bg_transparency", "bg_dim",
             "bg_blur_dp", "window_blur_dp", "key_label_scale", "side_padding_dp", "one_handed_w", "press_animation", "sound_volume", "anim_speed"
         ).forEach { put(it, 'f') }
         listOf(
@@ -580,7 +583,7 @@ object KeyboardPrefs {
     fun resetColors(context: Context) = edit(context) {
         listOf(
             "color_background", "color_key", "color_key_text", "color_func",
-            "color_func_text", "color_accent", "color_accent_text", "key_opacity"
+            "color_func_text", "color_accent", "color_accent_text", "key_opacity", "bg_transparency"
         ).forEach { remove(it) }
     }
 

@@ -271,6 +271,8 @@ data class KeyboardSkin(
     val windowBlur: Float? = null,
     /** Дымка поверх размытия: насколько непрозрачен фон клавиатуры. */
     val blurTint: Color? = null,
+    /** Светлый ободок по верхнему краю клавиатуры — край стеклянного листа. */
+    val edge: Color? = null,
     /** Поправки для тёмной темы: накладываются поверх основного оформления. */
     val dark: KeyboardSkin? = null,
     /** Непрозрачность клавиш из настроек темы (умножается на настройку «Непрозрачность клавиш»). */
@@ -300,6 +302,7 @@ data class KeyboardSkin(
             panel = pick(d.panel, panel),
             windowBlur = d.windowBlur ?: windowBlur,
             blurTint = d.blurTint ?: blurTint,
+            edge = d.edge ?: edge,
             keyAlpha = keyAlpha
         )
     }
@@ -515,6 +518,7 @@ object SkinParser {
             panel = o.optJSONObject("panel")?.let { style(it, "panel") },
             windowBlur = kb.f("windowBlur")?.coerceIn(0f, 150f),
             blurTint = color(kb.optString("blurTint"), "keyboard.blurTint"),
+            edge = color(kb.optString("edge"), "keyboard.edge"),
             dark = if (nested) null else o.optJSONObject("dark")?.let { parse(it, true) }
         )
     }

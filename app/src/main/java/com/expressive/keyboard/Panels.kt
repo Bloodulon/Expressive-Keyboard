@@ -202,10 +202,12 @@ internal fun TranslatorBar(state: KeyboardState, actions: KeyboardActions, setti
         state.translatorLoading = true
         delay(350L)
         // нет сети в первый раз — ещё одна попытка, прежде чем сдаться
-        var r = Translator.translate(input, "auto", target)
+        // языки раскладок — подсказка, на каком языке набран текст (текущая — первой)
+        val hints = (listOf(state.language.id) + Languages.enabled(settings).map { it.id }).map { it.substringBefore('-') }.distinct()
+        var r = Translator.translate(input, "auto", target, hints)
         if (r.isFailure) {
             delay(800L)
-            r = Translator.translate(input, "auto", target)
+            r = Translator.translate(input, "auto", target, hints)
         }
         state.translatorResult = r.getOrElse { "" }
         failed = r.isFailure
@@ -676,7 +678,7 @@ internal fun VoicePanel(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceEvenly
     ) {
-        Text(tr("Голосовой ввод") + " · ${state.language.label}", color = palette.onLetter, fontFamily = font, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+        Text((if (state.rambler) "Rambler" else tr("Голосовой ввод")) + " · ${state.language.label}", color = palette.onLetter, fontFamily = font, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
         Box(
             modifier = Modifier
                 .size(112.dp)

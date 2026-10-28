@@ -104,6 +104,26 @@ object KeyboardGeometry {
         KeyType.SPACER -> ""
     }
 
+    /** Буквенная клавиша, ближайшая к точке p (px в координатах клавиатуры), — не дальше ширины клавиши от центра. */
+    fun charKeyNear(p: Offset): KeyHandle? {
+        val l = layer?.coords ?: return null
+        var best: KeyHandle? = null
+        var bestD = Float.MAX_VALUE
+        for (h in snapshot()) {
+            if (h.key.type != KeyType.CHARACTER) continue
+            val k = h.holder.coords ?: continue
+            val pos = l.safePositionOf(k) ?: continue
+            val dx = (p.x - (pos.x + k.size.width / 2f)) / k.size.width.coerceAtLeast(1)
+            val dy = (p.y - (pos.y + k.size.height / 2f)) / k.size.height.coerceAtLeast(1)
+            val d = dx * dx + dy * dy
+            if (d < bestD) {
+                bestD = d
+                best = h
+            }
+        }
+        return best?.takeIf { bestD < 1f }
+    }
+
     fun find(name: String): KeyHandle? {
         val all = visible().map { it.first }
         return all.firstOrNull { nameOf(it) == name } ?: all.firstOrNull { nameOf(it).equals(name, ignoreCase = true) }

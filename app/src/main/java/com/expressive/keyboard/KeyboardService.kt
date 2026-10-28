@@ -149,6 +149,8 @@ class KeyboardState {
     var shift by mutableStateOf(ShiftState.OFF)
     var symbolsPage by mutableIntStateOf(0)
     var panel by mutableStateOf(ActivePanel.KEYBOARD)
+    /** Голосовая панель открыта удержанием микрофона — режим Rambler. */
+    var rambler by mutableStateOf(false)
     var toolbarOpen by mutableStateOf(false)
     var suggestions by mutableStateOf(SuggestionChipModel.EMPTY_ROW)
     /** Варианты китайского/японского ввода: показываются лентой вместо трёх подсказок. */
@@ -241,6 +243,12 @@ interface KeyboardActions {
     fun aiTool(id: String) {}
     /** Удержание пробела — действие из настроек. */
     fun spaceHold() {}
+    /** Свайп влево по ⌫: выделить столько слов перед курсором (0 — снять выделение). */
+    fun backspaceSelect(words: Int) {}
+    /** Свайп по ⌫ закончился: delete — стереть выделенное, иначе оставить текст как был. */
+    fun backspaceSelectDone(delete: Boolean) {}
+    /** Удержание микрофона: Rambler — диктовка без спешки, ИИ убирает «э-э», повторы и оговорки. */
+    fun rambler() {}
 }
 
 /**
@@ -297,6 +305,9 @@ internal class SafeActions(private val a: KeyboardActions, private val onError: 
     override fun aiFix() = guard { a.aiFix() }
     override fun aiTool(id: String) = guard { a.aiTool(id) }
     override fun spaceHold() = guard { a.spaceHold() }
+    override fun backspaceSelect(words: Int) = guard { a.backspaceSelect(words) }
+    override fun backspaceSelectDone(delete: Boolean) = guard { a.backspaceSelectDone(delete) }
+    override fun rambler() = guard { a.rambler() }
 }
 
 @Stable
@@ -328,6 +339,8 @@ class VoiceInput(
     private var lastLanguage: KeyboardLanguage? = null
     /** Идёт запуск/распознавание; после stop() поздние ошибки отмены не показываем. */
     private var active = false
+    /** Rambler: длинные паузы не обрывают запись, после каждой фразы слушаем дальше, пока не нажмут на микрофон. */
+    private var continuous = false
 
     fun hasPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -388,6 +401,7 @@ class VoiceInput(
                 status = tr("Вставлено: {0}", best)
                 onResult(best)
             } else status = tr("Речь не распознана")
+            if (continuous) lastLanguage?.let { launch(it) }
         }
         override fun onPartialResults(partialResults: Bundle?) {
             val p = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
@@ -396,7 +410,8 @@ class VoiceInput(
         override fun onEvent(eventType: Int, params: Bundle?) {}
     }
 
-    fun start(language: KeyboardLanguage) {
+    fun start(language: KeyboardLanguage, rambler: Boolean = false) {
+        continuous = rambler
         if (!hasPermission()) {
             status = tr("Нужен доступ к микрофону")
             return
@@ -471,10 +486,16 @@ class VoiceInput(
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
             VoiceBridge.uncensored(this)
+            if (continuous) {
+                // подумать посреди фразы можно: запись не обрывается на первой же паузе
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 4000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 6000L)
+            }
         }
         partial = ""
         listening = true
-        status = tr("Слушаю ({0})…", language.label)
+        status = if (continuous) tr("Rambler: говорите свободно, ИИ уберёт лишнее") else tr("Слушаю ({0})…", language.label)
         runCatching { r.startListening(intent) }.onFailure {
             listening = false
             destroyRecognizer()
@@ -497,6 +518,7 @@ class VoiceInput(
 
     fun stop() {
         active = false
+        continuous = false
         runCatching { recognizer?.cancel() }
         listening = false
         rms = 0f
@@ -2131,6 +2153,93 @@ class ComposeKeyboardService : InputMethodService(),
         schedulePredictions()
     }
 
+    // ------------------------------------------------------------------ выделение свайпом по ⌫
+
+    /** Где стоял курсор, когда начался свайп по ⌫ (-1 — свайпа нет), и текст перед ним. */
+    private var swipeAnchor = -1
+    private var swipeBefore = ""
+    private var swipeLength = 0
+    private var swipeWords = 0
+    /** Выделение было ещё до свайпа — стираем его целиком, слова не считаем. */
+    private var swipeHadSelection = false
+
+    override fun backspaceSelect(words: Int) {
+        swipeWords = words
+        if (panelInput != null) return
+        val ic = currentInputConnection ?: return
+        if (swipeAnchor < 0) {
+            finishComposing(ic)
+            rawComposing = ""
+            undo = null
+            autoSpace = false
+            lastActionWasSpace = false
+            swipeHadSelection = !runCatching { ic.getSelectedText(0) }.getOrNull().isNullOrEmpty()
+            if (swipeHadSelection) {
+                swipeAnchor = 0
+                return
+            }
+            val known = if (expSelStart >= 0 && expSelStart == expSelEnd) expSelStart else -1
+            swipeAnchor = if (known >= 0) known else runCatching {
+                ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0)?.let { it.startOffset + it.selectionEnd }
+            }.getOrNull() ?: -1
+            if (swipeAnchor < 0) return
+            swipeBefore = runCatching { ic.getTextBeforeCursor(2000, 0)?.toString() }.getOrNull().orEmpty()
+            swipeLength = 0
+        }
+        if (swipeHadSelection) return
+        // границы слов — как у стирания слова: слово вместе с пробелами после него
+        var len = 0
+        repeat(words) {
+            val rest = swipeBefore.substring(0, swipeBefore.length - len)
+            if (rest.isEmpty()) return@repeat
+            len += Regex("(\\S+\\s*|\\s+)$").find(rest)?.value?.length ?: 1
+        }
+        if (len == swipeLength) return
+        swipeLength = len
+        val start = swipeAnchor - len
+        ic.setSelection(start, swipeAnchor)
+        expSelStart = start
+        expSelEnd = swipeAnchor
+    }
+
+    override fun backspaceSelectDone(delete: Boolean) {
+        val anchor = swipeAnchor
+        val len = swipeLength
+        val hadSelection = swipeHadSelection
+        swipeAnchor = -1
+        swipeBefore = ""
+        swipeLength = 0
+        swipeHadSelection = false
+        panelInput?.let {
+            if (delete) repeat(swipeWords) { deleteWord() }
+            return
+        }
+        val ic = currentInputConnection ?: return
+        if (hadSelection) {
+            if (delete) {
+                ic.commitText("", 1)
+                expectUnknown()
+                schedulePredictions()
+            }
+            return
+        }
+        if (anchor < 0) {
+            // поле не сказало, где курсор: стираем по словам, как раньше
+            if (delete) repeat(swipeWords) { deleteWord() }
+            return
+        }
+        ic.beginBatchEdit()
+        ic.setSelection(anchor, anchor)
+        if (delete && len > 0) ic.deleteSurroundingText(len, 0)
+        ic.endBatchEdit()
+        expect(if (delete) anchor - len else anchor)
+        if (delete && len > 0) {
+            HapticsEngine.tick(this, inputView, settings)
+            if (anchor - len == 0) requestAutoCap()
+        }
+        schedulePredictions()
+    }
+
     override fun pickSuggestion(chip: SuggestionChipModel) {
         if (chip.isEmpty) return
         HapticsEngine.keyPress(this, inputView, settings, false)
@@ -2236,14 +2345,31 @@ class ComposeKeyboardService : InputMethodService(),
         }
         kb.panel = next
         if (next == ActivePanel.KEYBOARD) kb.toolbarOpen = false
-        if (next == ActivePanel.VOICE) voice.start(kb.language)
+        if (next == ActivePanel.VOICE) {
+            kb.rambler = false
+            voice.start(kb.language)
+        }
         // подсказки переводчика или обычного поля — по тому, куда теперь печатаем
         if (next == ActivePanel.TRANSLATE || old == ActivePanel.TRANSLATE) schedulePredictions()
     }
 
     override fun toggleVoice() {
         HapticsEngine.keyPress(this, inputView, settings, true)
-        if (voice.listening) voice.stop() else voice.start(kb.language)
+        if (voice.listening) voice.stop() else voice.start(kb.language, kb.rambler)
+    }
+
+    override fun rambler() {
+        HapticsEngine.tick(this, inputView, settings)
+        val s = settings
+        val keys = AiKeys(AiProvider.from(s.aiProvider), s.geminiKey, s.anthropicKey, s.openaiKey, s.groqKey)
+        if (!AiFix.hasLlm(keys)) {
+            Toast.makeText(this, tr("Rambler чистит речь через ИИ: добавьте ключ в настройках «ИИ»"), Toast.LENGTH_LONG).show()
+        }
+        if (kb.panel == ActivePanel.VOICE) voice.stop()
+        kb.rambler = true
+        kb.panel = ActivePanel.VOICE
+        kb.toolbarOpen = false
+        voice.start(kb.language, rambler = true)
     }
 
     override fun openSettings() {
@@ -2289,7 +2415,9 @@ class ComposeKeyboardService : InputMethodService(),
      */
     private fun cleanVoice(committed: String) {
         val s = settings
-        if (!s.aiVoiceCleanup || flags.isPassword || committed.trim().split(' ').size < 3) return
+        // в Rambler чистим всегда, даже короткие фразы и с выключенной очисткой диктовки
+        val rambler = kb.rambler
+        if ((!s.aiVoiceCleanup && !rambler) || flags.isPassword || committed.trim().split(' ').size < (if (rambler) 2 else 3)) return
         val keys = AiKeys(AiProvider.from(s.aiProvider), s.geminiKey, s.anthropicKey, s.openaiKey, s.groqKey)
         if (!AiFix.hasLlm(keys)) return
         serviceScope.launch {

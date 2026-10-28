@@ -369,6 +369,8 @@ internal fun HomePage(settings: KeyboardSettings, onNavigate: (SettingsPage) -> 
     }
     val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { micGranted = it }
     var query by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
+    AuthorLine()
+    UpdateCard()
     SettingsSection(null) {
         ChoiceItem(
             Icons.Rounded.Translate, "Язык приложения", null,
@@ -605,6 +607,12 @@ internal fun ColorsPage(settings: KeyboardSettings) {
             format = { "${(it * 100).roundToInt()}%" },
             onCommit = { v -> KeyboardPrefs.edit(context) { putFloat("key_opacity", v) } }
         )
+        SliderItem(
+            icon = Icons.Rounded.Opacity, title = "Прозрачность фона",
+            value = settings.bgTransparency, range = 0f..1f,
+            format = { if (it < 0.01f) tr("Нет") else "${(it * 100).roundToInt()}%" },
+            onCommit = { v -> KeyboardPrefs.edit(context) { putFloat("bg_transparency", v) } }
+        )
         ActionItem(Icons.Rounded.RestartAlt, "Вернуть цвета темы", "Сбросить акцент, ручные цвета и прозрачность", onClick = { KeyboardPrefs.resetColors(context) })
     }
     // система может запретить размытие окон: экономия заряда, «Уменьшить прозрачность», слабая видеокарта
@@ -692,7 +700,7 @@ internal fun KeysPage(settings: KeyboardSettings, onNavigate: (SettingsPage) -> 
     SettingsSection("Размеры") {
         SliderItem(
             icon = Icons.Rounded.Height, title = "Высота клавиш",
-            value = settings.keyHeightDp, range = 44f..68f,
+            value = settings.keyHeightDp, range = 32f..68f,
             format = { "${it.roundToInt()} dp" },
             onCommit = { v -> KeyboardPrefs.edit(context) { putFloat("key_height_dp", v) } }
         )
@@ -710,7 +718,7 @@ internal fun KeysPage(settings: KeyboardSettings, onNavigate: (SettingsPage) -> 
         )
         SliderItem(
             icon = Icons.Rounded.Menu, title = "Промежуток между рядами",
-            value = settings.rowSpacingDp, range = 4f..12f,
+            value = settings.rowSpacingDp, range = 2f..12f,
             format = { "${it.roundToInt()} dp" },
             onCommit = { v -> KeyboardPrefs.edit(context) { putFloat("row_spacing_dp", v) } }
         )
@@ -1540,6 +1548,33 @@ internal fun BackupPage() {
 
 // ----------------------------------------------------------------------- о приложении
 
+/** Автор и канал — синие ссылки на Telegram. */
+@Composable
+internal fun AuthorLine() {
+    val context = LocalContext.current
+    val blue = androidx.compose.ui.graphics.Color(0xFF2AABEE)
+    fun open(url: String) {
+        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(tr("Автор:"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            "@Shahedeer", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = blue,
+            modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { open("https://t.me/Shahedeer") }.padding(horizontal = 4.dp, vertical = 2.dp)
+        )
+        Text("·", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(tr("Канал:"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            "@materialyouboss", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = blue,
+            modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { open("https://t.me/materialyouboss") }.padding(horizontal = 4.dp, vertical = 2.dp)
+        )
+    }
+}
+
 @Composable
 internal fun AboutPage() {
     val context = LocalContext.current
@@ -1559,6 +1594,27 @@ internal fun AboutPage() {
         Text("Expressive Keyboard", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold, color = cs.onPrimaryContainer)
         Text(tr("Версия {0}", version) + " · Material 3 Expressive", style = MaterialTheme.typography.bodyMedium, color = cs.onPrimaryContainer.copy(alpha = 0.8f))
     }
+    AuthorLine()
+    SettingsSection("Обновления") {
+        val scope = rememberCoroutineScope()
+        var auto by remember { mutableStateOf(Updater.autoEnabled(context)) }
+        ActionItem(
+            Icons.Rounded.SystemUpdate, "Проверить обновления",
+            when {
+                Updater.checking -> tr("Проверяю…")
+                Updater.error != null -> Updater.error
+                Updater.available != null -> tr("Доступна версия {0}", Updater.available!!.version)
+                Updater.upToDate -> tr("У вас последняя версия")
+                else -> tr("Новые версии приходят с GitHub")
+            },
+            onClick = { scope.launch { Updater.check(context) } }
+        )
+        ToggleItem(Icons.Rounded.Autorenew, "Проверять при запуске", "Раз за запуск настроек, без фоновой работы", auto) { v ->
+            auto = v
+            Updater.setAuto(context, v)
+        }
+    }
+    UpdateCard()
     SettingsSection("Возможности") {
         listOf(
             Icons.Rounded.Palette to "Material You: цвета из обоев или из любого своего цвета",

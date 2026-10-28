@@ -135,6 +135,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -415,13 +416,16 @@ internal fun KeyView(
     gapY: Dp = 0.dp
 ) {
     val pluginState = PluginRepository.active
-    val variants = remember(key, upper, pluginState, holdSymbol) {
-        if (holdSymbol == null) key.variants(upper)
+    // с рядом цифр цифра под буквой верхнего ряда лишняя — она и так на виду
+    val noDigits = settings.showNumberRow && !numberRow && key.type == KeyType.CHARACTER && key.label.firstOrNull()?.isLetter() == true
+    val hold = holdSymbol?.takeUnless { noDigits && it.length == 1 && it[0].isDigit() }
+    val variants = remember(key, upper, pluginState, hold, noDigits) {
+        if (hold == null) key.variants(upper).let { v -> if (noDigits) v.filterNot { it.length == 1 && it[0].isDigit() } else v }
         else {
             // символ — по умолчанию (в середине), рядом только варианты самой буквы (ё, ъ, буквы с ударением)
             val letters = key.variants(upper).filter { v -> v.length == 1 && v[0].isLetter() && !v.equals(key.label, ignoreCase = true) }
             val mid = (letters.size + 1) / 2
-            letters.take(mid) + holdSymbol + letters.drop(mid)
+            letters.take(mid) + hold + letters.drop(mid)
         }
     }
     val output = remember(key, upper) { key.text(upper) }
@@ -452,7 +456,7 @@ internal fun KeyView(
     }
     val skinCache = remember { SkinKeyCache() }
     val isChar = key.type == KeyType.CHARACTER
-    val upHint = if (isChar) remember(label, variants, holdSymbol) { holdSymbol ?: hintFor(label, variants) } else null
+    val upHint = if (isChar) remember(label, variants, hold) { hold ?: hintFor(label, variants) } else null
     val cKey by rememberUpdatedState(key)
     val cLabel by rememberUpdatedState(label)
     val cOutput by rememberUpdatedState(output)
@@ -460,6 +464,7 @@ internal fun KeyView(
     val cSettings by rememberUpdatedState(settings)
     val cActions by rememberUpdatedState(actions)
     val cGlide by rememberUpdatedState(glideEnabled)
+    val cShift by rememberUpdatedState(shift)
     val cUpHint by rememberUpdatedState(upHint)
     val cGx by rememberUpdatedState(gx)
     val cGy by rememberUpdatedState(gy)
@@ -566,33 +571,46 @@ internal fun KeyView(
                                 var deadline = SystemClock.uptimeMillis() + 420L
                                 var wordMode = false
                                 var lastX = down.position.x
-                                while (true) {
-                                    val left = deadline - SystemClock.uptimeMillis()
-                                    val ev = if (left > 0) withTimeoutOrNull(left) { awaitPointerEvent() } else null
-                                    if (ev == null) {
-                                        if (!wordMode) {
-                                            act.keyTick()
-                                            act.commitKey(k, "")
+                                // свайп влево сначала выделяет слова (вправо — отпускает их обратно), а стирает
+                                // только по отпусканию: случайный мазок больше не съедает текст
+                                var words = 0
+                                var released = false
+                                try {
+                                    while (true) {
+                                        val left = deadline - SystemClock.uptimeMillis()
+                                        val ev = if (left > 0) withTimeoutOrNull(left) { awaitPointerEvent() } else null
+                                        if (ev == null) {
+                                            if (!wordMode) {
+                                                act.keyTick()
+                                                act.commitKey(k, "")
+                                            }
+                                            deadline = SystemClock.uptimeMillis() + 55L
+                                            continue
                                         }
-                                        deadline = SystemClock.uptimeMillis() + 55L
-                                        continue
-                                    }
-                                    val ch = ev.changes.firstOrNull { it.id == id } ?: break
-                                    if (!ch.pressed) break
-                                    if (!wordMode && cSettings.backspaceSwipe && down.position.x - ch.position.x > slop * 2) {
-                                        wordMode = true
-                                        lastX = ch.position.x
-                                        act.keyTick()
-                                        act.commitKey(k, DELETE_WORD)
-                                    }
-                                    if (wordMode) {
-                                        while (lastX - ch.position.x > wordStep) {
-                                            lastX -= wordStep
-                                            act.keyTick()
-                                            act.commitKey(k, DELETE_WORD)
+                                        val ch = ev.changes.firstOrNull { it.id == id } ?: break
+                                        if (!ch.pressed) {
+                                            released = true
+                                            break
                                         }
-                                        deadline = Long.MAX_VALUE
+                                        if (!wordMode && cSettings.backspaceSwipe && down.position.x - ch.position.x > slop * 2) {
+                                            wordMode = true
+                                            lastX = ch.position.x
+                                            words = 1
+                                            act.keyTick()
+                                            act.backspaceSelect(words)
+                                        }
+                                        if (wordMode) {
+                                            val n = floor((lastX - ch.position.x) / wordStep + 1f).toInt().coerceAtLeast(0)
+                                            if (n != words) {
+                                                words = n
+                                                act.keyTick()
+                                                act.backspaceSelect(words)
+                                            }
+                                            deadline = Long.MAX_VALUE
+                                        }
                                     }
+                                } finally {
+                                    if (wordMode) act.backspaceSelectDone(released && words > 0)
                                 }
                             }
                             KeyType.SHIFT -> {
@@ -723,6 +741,11 @@ internal fun KeyView(
                                 } else Long.MAX_VALUE
                                 var gesture = KeyGesture.CANCELED
                                 var last = down.position
+                                // куда «перепрыгнул» палец: на старых экранах отпускание пальца иногда теряется, и
+                                // следующее нажатие приходит тем же касанием — скачком через клавиатуру. Это два
+                                // нажатия, а не росчерк: раньше из него угадывалось слово, и «При» становилось
+                                // «При Привет»
+                                var jumpTo: Offset? = null
                                 while (true) {
                                     val ev = if (holdAt == Long.MAX_VALUE) awaitPointerEvent() else {
                                         val left = holdAt - SystemClock.uptimeMillis()
@@ -734,7 +757,22 @@ internal fun KeyView(
                                     }
                                     val ch = ev.changes.firstOrNull { it.id == id } ?: break
                                     val d = ch.position - down.position
+                                    val prev = last
                                     last = ch.position
+                                    if (letterKey && !rolled && ch.pressed && (prev - down.position).getDistance() < glideStart) {
+                                        var from = prev
+                                        var jump = 0f
+                                        for (h in ch.historical) {
+                                            jump = max(jump, (h.position - from).getDistance())
+                                            from = h.position
+                                        }
+                                        jump = max(jump, (ch.position - from).getDistance())
+                                        if (jump > iw * 1.3f) {
+                                            jumpTo = ch.position
+                                            gesture = KeyGesture.RELEASED
+                                            break
+                                        }
+                                    }
                                     // клавишу уже «перекатили» — она сработала, ждём только отпускания
                                     if (rolled) {
                                         if (!ch.pressed) break
@@ -763,9 +801,27 @@ internal fun KeyView(
                                     gesture = KeyGesture.CANCELED
                                 }
                                 when (gesture) {
-                                    KeyGesture.RELEASED -> if (!instant) {
-                                        act.keyTouch(touchX, touchY)
-                                        act.commitKey(k, tapOut)
+                                    KeyGesture.RELEASED -> {
+                                        if (!instant) {
+                                            act.keyTouch(touchX, touchY)
+                                            act.commitKey(k, tapOut)
+                                        }
+                                        jumpTo?.let { p ->
+                                            popup.clear(holder)
+                                            val o = origin()
+                                            val next = if (o != null) KeyboardGeometry.charKeyNear(o + p) else null
+                                            if (next != null) {
+                                                act.keyDown(next.key)
+                                                act.keyTouch(0f, 0f)
+                                                act.commitKey(next.key, next.key.text(cShift == ShiftState.CAPS_LOCK))
+                                                next.pulse()
+                                            }
+                                            // второй палец ещё на экране — его движения и отпускание ничего не вводят
+                                            while (true) {
+                                                val c2 = awaitPointerEvent().changes.firstOrNull { it.id == id } ?: break
+                                                if (!c2.pressed) break
+                                            }
+                                        }
                                     }
                                     KeyGesture.CANCELED -> Unit
                                     KeyGesture.SWIPE_UP -> {
@@ -951,7 +1007,7 @@ internal fun KeyView(
                 fontSize = when {
                     key.type == KeyType.MODE_SYMBOLS || key.type == KeyType.SYMBOLS_PAGE -> (15f * scale).sp
                     numberRow -> (17f * settings.keyLabelScale * scale).sp
-                    else -> ((settings.keyHeightDp * 0.4f).coerceIn(18f, 25f) * settings.keyLabelScale * scale).sp
+                    else -> ((settings.keyHeightDp * 0.4f).coerceIn(14f, 25f) * settings.keyLabelScale * scale).sp
                 },
                 maxLines = 1,
                 softWrap = false,
@@ -963,11 +1019,13 @@ internal fun KeyView(
         if (hint != null) {
             Text(
                 hint,
-                modifier = Modifier.align(Alignment.TopEnd).padding(top = 3.dp, end = 5.dp),
+                // в самом углу клавиши, как в Gboard: подальше от буквы, чтобы не сливался с ней
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 1.dp, end = 3.dp),
                 color = fg.copy(alpha = 0.5f),
                 fontFamily = font,
                 fontWeight = FontWeight.Bold,
                 fontSize = 9.sp,
+                lineHeight = 9.sp,
                 maxLines = 1
             )
         }
@@ -1144,6 +1202,7 @@ internal fun CookieButton(
     color: Color,
     size: Dp,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -1158,10 +1217,29 @@ internal fun CookieButton(
                 scaleY = scale
             }
             .wavyBackground(spec, color) { rot }
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+            .combinedClickable(interactionSource = interaction, indication = null, onLongClick = onLongClick, onClick = onClick),
         contentAlignment = Alignment.Center,
         content = content
     )
+}
+
+/** Контур по верху клавиатуры: линия вдоль края и скруглений, к бокам гаснет. */
+internal fun DrawScope.drawTopEdge(color: Color, cornerPx: Float) {
+    val w = size.width
+    val stroke = 1.dp.toPx()
+    val half = stroke / 2f
+    val r = cornerPx.coerceIn(0f, min(w / 2f, size.height))
+    val tail = r + 18.dp.toPx()
+    val path = Path().apply {
+        moveTo(half, min(size.height, tail))
+        lineTo(half, r)
+        if (r > 0f) arcTo(Rect(half, half, 2 * r - half, 2 * r - half), 180f, 90f, false)
+        lineTo(w - r, half)
+        if (r > 0f) arcTo(Rect(w - 2 * r + half, half, w - half, 2 * r - half), 270f, 90f, false)
+        lineTo(w - half, min(size.height, tail))
+    }
+    val brush = Brush.verticalGradient(0f to color, (r / tail).coerceIn(0f, 1f) to color.copy(alpha = color.alpha * 0.6f), 1f to Color.Transparent, endY = tail)
+    drawPath(path, brush, style = Stroke(stroke))
 }
 
 /** Окно клавиатуры больше самой клавиатуры — размытие окна вышло бы за её края. */
@@ -1228,6 +1306,7 @@ internal fun SkinButton(
     palette: KeyPalette,
     size: Dp,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -1249,7 +1328,7 @@ internal fun SkinButton(
                 scaleY = s
             }
             .drawBehind { drawSkinKey(st, base, p, size.toPx() / 2f, size.toPx() / 2f, cache, backdrop) { keyPosIn(holder, backdrop) } }
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+            .combinedClickable(interactionSource = interaction, indication = null, onLongClick = onLongClick, onClick = onClick),
         contentAlignment = Alignment.Center,
         content = content
     )
@@ -1286,8 +1365,8 @@ internal fun HeaderBar(
     val skinButtons = LocalSkin.current?.buttons
     val btnFg = skinButtons?.let { it.text ?: palette.onFunc } ?: palette.onAccent
     val headerButton: @Composable (() -> Unit, @Composable BoxScope.() -> Unit) -> Unit = { onClick, content ->
-        if (skinButtons != null) SkinButton(skinButtons, palette, button, onClick, content)
-        else CookieButton(spec, palette.accent, button, onClick, content)
+        if (skinButtons != null) SkinButton(skinButtons, palette, button, onClick, content = content)
+        else CookieButton(spec, palette.accent, button, onClick, content = content)
     }
     Row(
         modifier = Modifier.fillMaxWidth().height(if (settings.landscape) 40.dp else 48.dp),
@@ -1334,9 +1413,14 @@ internal fun HeaderBar(
             } else content(mode)
         }
         if (settings.showMicButton) {
-            headerButton({ actions.togglePanel(ActivePanel.VOICE) }) {
+            // удержание — Rambler: диктовка без спешки, ИИ убирает «э-э», повторы и оговорки
+            val onMic = { actions.togglePanel(ActivePanel.VOICE) }
+            val onRambler = { actions.rambler() }
+            val mic: @Composable BoxScope.() -> Unit = {
                 SlotIcon("mic", btnFg, 22.dp) { Icon(Icons.Outlined.Mic, null, tint = btnFg, modifier = Modifier.size(22.dp)) }
             }
+            if (skinButtons != null) SkinButton(skinButtons, palette, button, onMic, onRambler, mic)
+            else CookieButton(spec, palette.accent, button, onMic, onRambler, mic)
         }
     }
 }
@@ -1947,8 +2031,11 @@ fun KeyboardRoot(
         }
         val blurDp = wantBlur?.takeIf { it > 0f && blurSupported && image == null }
         // дымка поверх размытия: у темы своя, иначе — полупрозрачный фон клавиатуры
-        val blurTint = skin?.blurTint ?: palette.background.copy(alpha = if (palette.background.luminance() < 0.5f) 0.62f else 0.55f)
-        val decorated = image != null || skin?.hasBackground == true || blurDp != null
+        val blurTint0 = skin?.blurTint ?: palette.background.copy(alpha = if (palette.background.luminance() < 0.5f) 0.62f else 0.55f)
+        // прозрачный фон: сквозь клавиатуру видно приложение, остаются только клавиши
+        val bgAlpha = 1f - settings.bgTransparency
+        val blurTint = blurTint0.copy(alpha = blurTint0.alpha * bgAlpha)
+        val decorated = image != null || skin?.hasBackground == true || blurDp != null || bgAlpha < 0.99f
         LaunchedEffect(palette.background, decorated) { onBackground(palette.background, decorated) }
         val corner = skin?.corner ?: 28f
         LaunchedEffect(blurDp, blurTint, corner) {
@@ -1971,7 +2058,7 @@ fun KeyboardRoot(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(topStart = (skin?.corner ?: 28f).dp, topEnd = (skin?.corner ?: 28f).dp),
                 // при размытии окна фон рисует само окно (дымка поверх размытия)
-                color = if (blurDp != null) Color.Transparent else palette.background
+                color = if (blurDp != null) Color.Transparent else palette.background.copy(alpha = palette.background.alpha * bgAlpha)
             ) {
                 Box(
                     Modifier.fillMaxWidth().onGloballyPositioned {
@@ -1979,19 +2066,20 @@ fun KeyboardRoot(
                         if (it.size != rootSize) rootSize = it.size
                     }
                 ) {
-                    if (skin != null && skin.hasBackground && blurDp == null) {
-                        Canvas(Modifier.matchParentSize()) { drawSkinBackground(skin, size) }
+                    if (skin != null && skin.hasBackground && blurDp == null && bgAlpha > 0.01f) {
+                        Canvas(Modifier.matchParentSize().graphicsLayer { alpha = bgAlpha }) { drawSkinBackground(skin, size) }
                     }
-                    if (image != null) {
+                    if (image != null && bgAlpha > 0.01f) {
                         val blur = settings.bgBlurDp
                         Image(
                             bitmap = image,
                             contentDescription = null,
                             contentScale = ContentScale.Crop,
+                            alpha = bgAlpha,
                             modifier = Modifier.matchParentSize()
                                 .then(if (blur > 0f && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Modifier.blur(blur.dp) else Modifier)
                         )
-                        if (settings.bgDim > 0f) Box(Modifier.matchParentSize().background(palette.background.copy(alpha = settings.bgDim)))
+                        if (settings.bgDim > 0f) Box(Modifier.matchParentSize().background(palette.background.copy(alpha = settings.bgDim * bgAlpha)))
                     }
                     // фон — до самых краёв экрана, клавиши — в стороне от выреза камеры, боковой панели навигации
                     // и скруглённых углов экрана; отступы одинаковые с обеих сторон, иначе в альбомной одна
@@ -2009,6 +2097,10 @@ fun KeyboardRoot(
                             .padding(bottom = settings.bottomOffsetDp.dp)
                     ) {
                         KeyboardScreen(state, actions, voice, settings, palette, font)
+                    }
+                    // ободок стеклянного листа: светлая линия по верхнему краю, по скруглениям уходит в ничто
+                    skin?.edge?.let { edge ->
+                        Canvas(Modifier.matchParentSize()) { drawTopEdge(edge, corner.dp.toPx()) }
                     }
                     // улучшение текста: плашка с индикатором поверх клавиатуры
                     AiGlowOverlay(state.aiBusy, state.aiDone, palette, font)
