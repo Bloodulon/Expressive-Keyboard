@@ -1218,7 +1218,7 @@ internal fun PluginsPage() {
         r.onSuccess { p ->
             Toast.makeText(context, tr("Плагин «{0}» установлен", p.name), Toast.LENGTH_SHORT).show()
             expanded = p.id
-            if (p.usesNetwork || "read_text" in p.permissions || "clipboard" in p.permissions) pendingNetwork = p
+            if (p.usesNetwork || p.permissions.any { it in setOf("read_text", "clipboard", "launch", "ai") }) pendingNetwork = p
         }.onFailure { Toast.makeText(context, tr("Ошибка: {0}", it.message), Toast.LENGTH_LONG).show() }
     }
     val modExampleLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/javascript")) { uri: Uri? ->
@@ -1321,6 +1321,8 @@ internal fun PluginsPage() {
                     tr("«{0}» просит:", p.name) + "\n\n" + buildList {
                         if ("read_text" in p.permissions) add("• " + tr("читать набираемый текст и текст в поле"))
                         if ("clipboard" in p.permissions) add("• " + tr("читать историю буфера обмена"))
+                        if ("launch" in p.permissions) add("• " + tr("открывать ссылки, приложения и окно «Поделиться»"))
+                        if ("ai" in p.permissions) add("• " + tr("отправлять запросы ИИ по вашему ключу (расходует лимит ключа)"))
                         if ("network" in p.permissions) add(
                             "• " + tr("выходить в интернет") + p.actions.filter { it.type == PluginActionType.HTTP }
                                 .joinToString("") { "\n   ${it.title}: ${Uri.parse(it.url).host}" }
@@ -1391,11 +1393,17 @@ internal fun PluginCard(p: KeyboardPlugin, expanded: Boolean, onExpand: () -> Un
                                 when (it) {
                                     "read_text" -> tr("читает текст")
                                     "clipboard" -> tr("буфер обмена")
+                                    "launch" -> tr("открывает приложения")
+                                    "ai" -> tr("ИИ по вашему ключу")
                                     else -> tr("интернет")
                                 }
                             },
                             style = MaterialTheme.typography.bodySmall, color = cs.tertiary
                         )
+                    }
+                    if (p.config.isNotEmpty()) {
+                        Text(tr("Настройки мода"), style = MaterialTheme.typography.labelLarge, color = cs.primary)
+                        ModConfigEditor(p)
                     }
                     if (p.actions.isNotEmpty()) {
                         Text(tr("Действия"), style = MaterialTheme.typography.labelLarge, color = cs.primary)
@@ -1547,6 +1555,64 @@ internal fun BackupPage() {
 }
 
 // ----------------------------------------------------------------------- о приложении
+
+/** Настройки мода из его блока "config": переключатели, выбор, ползунки и текст. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun ModConfigEditor(p: KeyboardPlugin) {
+    val context = LocalContext.current
+    val cs = MaterialTheme.colorScheme
+    var tick by remember { mutableIntStateOf(0) }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        for (o in p.config) {
+            val value = remember(tick, o) { ModConfig.get(context, p, o) }
+            fun set(v: Any?) {
+                ModConfig.set(context, p, o.id, v)
+                tick++
+            }
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(cs.surfaceContainerHighest).padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                when (o.type) {
+                    "toggle" -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(o.title, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                        Switch(checked = value == true, onCheckedChange = { set(it) })
+                    }
+                    "choice" -> {
+                        Text(o.title, style = MaterialTheme.typography.bodyMedium)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            for ((cid, ctitle) in o.choices) {
+                                FilterChip(selected = value?.toString() == cid, onClick = { set(cid) }, label = { Text(ctitle) })
+                            }
+                        }
+                    }
+                    "slider" -> {
+                        var v by remember(tick, o) { mutableFloatStateOf((value as? Number)?.toFloat() ?: o.min) }
+                        Text("${o.title}: " + if (o.step >= 1f) v.roundToInt().toString() else "%.2f".format(v), style = MaterialTheme.typography.bodyMedium)
+                        Slider(
+                            value = v.coerceIn(o.min, o.max),
+                            onValueChange = { x -> v = if (o.step > 0f) (kotlin.math.round((x - o.min) / o.step) * o.step + o.min).coerceIn(o.min, o.max) else x },
+                            onValueChangeFinished = { set(v) },
+                            valueRange = o.min..maxOf(o.max, o.min + 0.001f)
+                        )
+                    }
+                    else -> {
+                        var t by remember(tick, o) { mutableStateOf(value?.toString().orEmpty()) }
+                        OutlinedTextField(
+                            value = t, onValueChange = { t = it }, label = { Text(o.title) }, singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            trailingIcon = {
+                                if (t != value?.toString().orEmpty()) IconButton(onClick = { set(t) }) { Icon(Icons.Rounded.Check, null) }
+                            }
+                        )
+                    }
+                }
+                if (o.description.isNotEmpty()) Text(o.description, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+            }
+        }
+    }
+}
 
 /** Автор и канал — синие ссылки на Telegram. */
 @Composable

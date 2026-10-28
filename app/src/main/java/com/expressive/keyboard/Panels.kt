@@ -52,6 +52,7 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
@@ -883,22 +884,148 @@ internal fun ScriptPanelView(panel: ScriptPanel, palette: KeyPalette, font: Font
 internal fun ScriptNode(n: UiNode, palette: KeyPalette, font: FontFamily, onClick: (ScriptCall, Any?) -> Unit) {
     when (n) {
         is UiNode.Text -> Text(
-            n.text, color = n.color?.let { Color(it) } ?: palette.onLetter, fontFamily = font, fontSize = n.size.sp,
+            n.text, color = n.color?.let { Color(it) } ?: palette.onLetter,
+            fontFamily = if (n.mono) FontFamily.Monospace else font, fontSize = n.size.sp,
             fontWeight = if (n.bold) FontWeight.ExtraBold else FontWeight.Medium,
-            textAlign = if (n.center) TextAlign.Center else TextAlign.Start,
-            modifier = if (n.center) Modifier.fillMaxWidth() else Modifier
+            fontStyle = if (n.italic) androidx.compose.ui.text.font.FontStyle.Italic else null,
+            textAlign = when (n.align) {
+                "center" -> TextAlign.Center
+                "end", "right" -> TextAlign.End
+                else -> TextAlign.Start
+            },
+            maxLines = n.maxLines, overflow = TextOverflow.Ellipsis,
+            modifier = if (n.align != "start") Modifier.fillMaxWidth() else Modifier
         )
         is UiNode.Button -> {
-            val bg = if (n.accent) palette.accent else palette.letter
-            val fg = if (n.accent) palette.onAccent else palette.onLetter
+            val bg = n.color?.let { Color(it) } ?: if (n.accent) palette.accent else palette.letter
+            val fg = n.textColor?.let { Color(it) } ?: if (n.accent) palette.onAccent else palette.onLetter
+            val enabled = !n.disabled && (n.action != null || n.longAction != null)
             Row(
-                Modifier.then(if (n.wide) Modifier.fillMaxWidth() else Modifier).height(44.dp).clip(RoundedCornerShape(18.dp)).background(bg)
-                    .clickable(enabled = n.action != null) { n.action?.let { onClick(it, n.value) } }.padding(horizontal = 14.dp),
+                Modifier.then(if (n.wide) Modifier.fillMaxWidth() else Modifier).height(44.dp).clip(RoundedCornerShape(18.dp))
+                    .background(if (n.disabled) bg.copy(alpha = bg.alpha * 0.4f) else bg)
+                    .combinedClickable(
+                        enabled = enabled,
+                        onLongClick = n.longAction?.let { la -> { onClick(la, n.value) } }
+                    ) { n.action?.let { onClick(it, n.value) } }
+                    .padding(horizontal = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
             ) {
                 if (n.icon.isNotEmpty()) SpecIcon(n.icon, fg, 18.dp)
                 if (n.text.isNotEmpty()) Text(n.text, color = fg, fontFamily = font, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1)
+            }
+        }
+        is UiNode.Input -> {
+            val empty = n.value.isEmpty()
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (n.title.isNotEmpty()) Text(n.title, color = palette.muted, fontFamily = font, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(16.dp)).background(palette.letter)
+                        .border(1.5.dp, palette.accent.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                        .clickable { ScriptHost.openInput(n) }.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("✎", color = palette.accent, fontSize = 14.sp)
+                    Text(
+                        if (empty) n.hint.ifEmpty { tr("Нажмите, чтобы ввести") } else n.value,
+                        color = if (empty) palette.muted else palette.onLetter, fontFamily = font, fontSize = 14.sp,
+                        maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+        is UiNode.Toggle -> Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(palette.letter)
+                .clickable(enabled = n.action != null) { n.action?.let { onClick(it, !n.checked) } }
+                .padding(horizontal = 14.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(n.text, color = palette.onLetter, fontFamily = font, fontWeight = FontWeight.Bold, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Switch(
+                checked = n.checked, onCheckedChange = { v -> n.action?.let { onClick(it, v) } },
+                colors = SwitchDefaults.colors(checkedTrackColor = palette.accent, checkedThumbColor = palette.onAccent)
+            )
+        }
+        is UiNode.Slider -> {
+            var v by remember(n.value) { mutableFloatStateOf(n.value) }
+            Column(Modifier.fillMaxWidth()) {
+                if (n.text.isNotEmpty()) {
+                    val shown = if (n.step >= 1f || (n.max - n.min) >= 20f) v.roundToInt().toString() else "%.2f".format(v)
+                    Text("${n.text}: $shown", color = palette.onLetter, fontFamily = font, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+                Slider(
+                    value = v,
+                    onValueChange = { x -> v = if (n.step > 0f) (kotlin.math.round((x - n.min) / n.step) * n.step + n.min).coerceIn(n.min, n.max) else x },
+                    onValueChangeFinished = { n.action?.let { onClick(it, v.toDouble()) } },
+                    valueRange = n.min..n.max,
+                    colors = SliderDefaults.colors(thumbColor = palette.accent, activeTrackColor = palette.accent)
+                )
+            }
+        }
+        is UiNode.Progress -> {
+            val p = n.value
+            if (p == null) LinearProgressIndicator(Modifier.fillMaxWidth(), color = palette.accent, trackColor = palette.letter)
+            else LinearProgressIndicator(progress = { p }, modifier = Modifier.fillMaxWidth(), color = palette.accent, trackColor = palette.letter)
+        }
+        is UiNode.Divider -> HorizontalDivider(color = palette.muted.copy(alpha = 0.3f))
+        is UiNode.Box -> {
+            val shape = RoundedCornerShape(n.radius.dp)
+            Column(
+                Modifier.fillMaxWidth().clip(shape).background(n.color?.let { Color(it) } ?: palette.letter)
+                    .then(if (n.border != null) Modifier.border(1.5.dp, Color(n.border), shape) else Modifier)
+                    .clickable(enabled = n.action != null) { n.action?.let { onClick(it, n.value) } }
+                    .padding(n.padding.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                for (c in n.children) ScriptNode(c, palette, font, onClick)
+            }
+        }
+        is UiNode.Tabs -> Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            for (item in n.items) {
+                val sel = item.value == n.selected || item.text == n.selected?.toString()
+                Row(
+                    Modifier.clip(CircleShape).background(if (sel) palette.accent else palette.func)
+                        .clickable(enabled = n.action != null) { n.action?.let { onClick(it, item.value) } }
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val fg = if (sel) palette.onAccent else palette.onFunc
+                    if (item.icon.isNotEmpty()) SpecIcon(item.icon, fg, 16.dp)
+                    if (item.text.isNotEmpty()) Text(item.text, color = fg, fontFamily = font, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1)
+                }
+            }
+        }
+        is UiNode.Canvas -> {
+            val measurer = rememberTextMeasurer()
+            val path = remember { Path() }
+            val dens = LocalDensity.current.density
+            Box(
+                Modifier.fillMaxWidth().height(n.height.dp).clip(RoundedCornerShape(16.dp))
+                    .then(
+                        if (n.action != null) Modifier.pointerInput(n.action) {
+                            detectTapGestures { p -> onClick(n.action, mapOf("x" to (p.x / dens).toDouble(), "y" to (p.y / dens).toDouble())) }
+                        } else Modifier
+                    )
+                    .drawBehind { drawOverlayItems(n.items, measurer, path) }
+            )
+        }
+        is UiNode.Scroll -> {
+            val sized = if (n.height > 0f) Modifier.heightIn(max = n.height.dp) else Modifier
+            if (n.horizontal) Row(
+                Modifier.fillMaxWidth().then(sized).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                for (c in n.children) ScriptNode(c, palette, font, onClick)
+            } else Column(
+                Modifier.fillMaxWidth().then(sized).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                for (c in n.children) ScriptNode(c, palette, font, onClick)
             }
         }
         is UiNode.Row -> FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -939,6 +1066,35 @@ internal fun ScriptNode(n: UiNode, palette: KeyPalette, font: FontFamily, onClic
             )
         }
         is UiNode.Error -> Text("⚠ ${n.message}", color = palette.accent, fontFamily = font, fontSize = 13.sp)
+    }
+}
+
+/** Поле ввода мода над клавиатурой: заголовок, набранный текст, ← закрыть, ✓ отправить. */
+@Composable
+internal fun ScriptInputBar(actions: KeyboardActions, palette: KeyPalette, font: FontFamily) {
+    val text = ScriptHost.promptText
+    val title = ScriptHost.promptTitle
+    Row(
+        Modifier.fillMaxWidth().panelSurface(palette).padding(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Box(
+            Modifier.size(40.dp).clip(CircleShape).background(palette.func).clickable { actions.scriptPromptDone(false) },
+            contentAlignment = Alignment.Center
+        ) { Text("←", color = palette.onFunc, fontFamily = font, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp) }
+        Column(Modifier.weight(1f)) {
+            if (title.isNotEmpty()) Text(title, color = palette.accent, fontFamily = font, fontWeight = FontWeight.Bold, fontSize = 11.sp, maxLines = 1)
+            Text(
+                if (text.isEmpty()) ScriptHost.promptHint.ifEmpty { tr("Введите текст") } else text + "▏",
+                color = if (text.isEmpty()) palette.muted else palette.onLetter,
+                fontFamily = font, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
+            )
+        }
+        Box(
+            Modifier.size(40.dp).clip(CircleShape).background(palette.accent).clickable { actions.scriptPromptDone(true) },
+            contentAlignment = Alignment.Center
+        ) { Text("✓", color = palette.onAccent, fontFamily = font, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp) }
     }
 }
 

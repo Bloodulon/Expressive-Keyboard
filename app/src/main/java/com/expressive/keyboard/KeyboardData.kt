@@ -144,7 +144,8 @@ enum class ShiftState { OFF, SINGLE, CAPS_LOCK }
 
 /** EMOJI_SEARCH / GIF_SEARCH — поиск: клавиатура печатает в строку поиска. */
 /** AI_WRITE — панель «ИИ» над клавиатурой, AI_PROMPT — клавиатура печатает своё указание для ИИ. */
-enum class ActivePanel { KEYBOARD, EMOJI, EMOJI_SEARCH, TRANSLATE, GIF, GIF_SEARCH, CLIPBOARD, VOICE, PLUGINS, AI_WRITE, AI_PROMPT }
+/** SCRIPT_INPUT — клавиатура печатает в поле ввода мода (kb.prompt и элемент input на панели мода). */
+enum class ActivePanel { KEYBOARD, EMOJI, EMOJI_SEARCH, TRANSLATE, GIF, GIF_SEARCH, CLIPBOARD, VOICE, PLUGINS, AI_WRITE, AI_PROMPT, SCRIPT_INPUT }
 
 @Immutable
 data class KeyModel(

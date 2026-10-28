@@ -2140,6 +2140,8 @@ internal fun KeyboardScreen(
     val gap = if (settings.landscape) 4.dp else 8.dp
 
     Box(Modifier.fillMaxWidth().onGloballyPositioned { layer.coords = it }) {
+        // слой мода под клавишами — первым, чтобы клавиши легли поверх
+        ScriptBackgroundLayer()
         Column(
             modifier = Modifier.fillMaxWidth().padding(horizontal = settings.sidePaddingDp.dp, vertical = gap),
             verticalArrangement = Arrangement.spacedBy(gap)
@@ -2150,9 +2152,10 @@ internal fun KeyboardScreen(
             if (panel == ActivePanel.EMOJI_SEARCH) EmojiSearchBar(state, actions, settings, palette, font)
             if (panel == ActivePanel.GIF_SEARCH) GifSearchBar(state, actions, palette, font)
             if (panel == ActivePanel.AI_WRITE || panel == ActivePanel.AI_PROMPT) AiWriteBar(state, actions, palette, font)
+            if (panel == ActivePanel.SCRIPT_INPUT) ScriptInputBar(actions, palette, font)
             Box(Modifier.fillMaxWidth().height(bodyHeight)) {
                 val body = if (panel == ActivePanel.TRANSLATE || panel == ActivePanel.EMOJI_SEARCH || panel == ActivePanel.GIF_SEARCH ||
-                    panel == ActivePanel.AI_WRITE || panel == ActivePanel.AI_PROMPT) {
+                    panel == ActivePanel.AI_WRITE || panel == ActivePanel.AI_PROMPT || panel == ActivePanel.SCRIPT_INPUT) {
                     ActivePanel.KEYBOARD
                 } else panel
                 if (settings.panelAnimations && settings.animPanel != "NONE") {

@@ -249,6 +249,8 @@ interface KeyboardActions {
     fun backspaceSelectDone(delete: Boolean) {}
     /** Удержание микрофона: Rambler — диктовка без спешки, ИИ убирает «э-э», повторы и оговорки. */
     fun rambler() {}
+    /** Поле ввода мода: submit — отправить набранное (✓), иначе закрыть без отправки (←). */
+    fun scriptPromptDone(submit: Boolean) {}
 }
 
 /**
@@ -308,6 +310,7 @@ internal class SafeActions(private val a: KeyboardActions, private val onError: 
     override fun backspaceSelect(words: Int) = guard { a.backspaceSelect(words) }
     override fun backspaceSelectDone(delete: Boolean) = guard { a.backspaceSelectDone(delete) }
     override fun rambler() = guard { a.rambler() }
+    override fun scriptPromptDone(submit: Boolean) = guard { a.scriptPromptDone(submit) }
 }
 
 @Stable
@@ -650,6 +653,7 @@ class ComposeKeyboardService : InputMethodService(),
             ActivePanel.EMOJI_SEARCH -> kb.emojiQuery
             ActivePanel.GIF_SEARCH -> kb.gifQuery
             ActivePanel.AI_PROMPT -> kb.aiPrompt
+            ActivePanel.SCRIPT_INPUT -> ScriptHost.promptText
             else -> null
         }
         set(v) {
@@ -658,6 +662,7 @@ class ComposeKeyboardService : InputMethodService(),
                 ActivePanel.EMOJI_SEARCH -> kb.emojiQuery = v.orEmpty()
                 ActivePanel.GIF_SEARCH -> kb.gifQuery = v.orEmpty()
                 ActivePanel.AI_PROMPT -> kb.aiPrompt = v.orEmpty()
+                ActivePanel.SCRIPT_INPUT -> ScriptHost.promptChanged(v.orEmpty())
                 else -> Unit
             }
             // в переводчике — подсказки и исправления для набираемого слова, как в обычном поле
@@ -736,6 +741,25 @@ class ComposeKeyboardService : InputMethodService(),
         PowerState.update(this)
         runCatching { registerReceiver(powerReceiver, android.content.IntentFilter(android.os.PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)) }
         Subtypes.register(this, enabled)
+        // события модов о смене панели и Shift — из состояния, где бы его ни поменяли
+        serviceScope.launch {
+            var lastPanel = kb.panel
+            androidx.compose.runtime.snapshotFlow { kb.panel }.collect { p ->
+                if (lastPanel == ActivePanel.SCRIPT_INPUT && p != ActivePanel.SCRIPT_INPUT) ScriptHost.promptClosed()
+                lastPanel = p
+                if (ScriptHost.has("panel")) ScriptHost.emit("panel", p.name.lowercase())
+            }
+        }
+        serviceScope.launch {
+            androidx.compose.runtime.snapshotFlow { kb.shift }.collect { s ->
+                if (ScriptHost.has("shift")) ScriptHost.emit("shift", scriptShift())
+            }
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (ScriptHost.has("device")) ScriptHost.emit("device", ScriptHost.device())
     }
 
     /** Новый скриншот: в историю буфера и, если он свежий, — предложение вставить над клавиатурой. */
@@ -1130,6 +1154,7 @@ class ComposeKeyboardService : InputMethodService(),
         candidatesStart: Int, candidatesEnd: Int
     ) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+        if (ScriptHost.has("selection")) ScriptHost.emit("selection", mapOf("start" to newSelStart, "end" to newSelEnd))
         // в поле появился текст — панель функций уступает подсказкам сразу, без ожидания предсказаний
         if (kb.fieldEmpty && (newSelStart > 0 || newSelEnd > 0 || candidatesEnd > 0)) kb.fieldEmpty = false
         if (expSelStart < 0 || expSelEnd < 0) {
@@ -1258,7 +1283,14 @@ class ComposeKeyboardService : InputMethodService(),
         // иначе каждый пробел при быстром наборе подвешивал клавиатуру
         val sys = if (!systemSpellAllowed()) null
         else SystemSpell.cached(lang, word) ?: if (own != null) SystemSpell.await(lang, word, 8L) else null
-        val c = if (systemSpellAllowed()) WordPredictorEngine.mergeSystem(word, own, sys, lang, strength) else own
+        var c = if (systemSpellAllowed()) WordPredictorEngine.mergeSystem(word, own, sys, lang, strength) else own
+        // мод может отменить исправление (false) или предложить своё (строка)
+        if (ScriptHost.has("autocorrect") && !flags.isPassword) {
+            for (r in ScriptHost.emit("autocorrect", mapOf("word" to word, "correction" to c))) {
+                if (r == false) return null
+                if (r is String && r.isNotEmpty()) c = r
+            }
+        }
         return if (c != null && c != word) c else null
     }
 
@@ -1291,6 +1323,12 @@ class ComposeKeyboardService : InputMethodService(),
     private fun schedulePredictions() {
         if (kb.panel == ActivePanel.TRANSLATE) {
             schedulePanelPredictions()
+            return
+        }
+        // в поле мода подсказки для текста приложения были бы не к месту
+        if (kb.panel == ActivePanel.SCRIPT_INPUT) {
+            predictionJob?.cancel()
+            if (scriptPickRow == null || kb.suggestions !== scriptPickRow) kb.suggestions = SuggestionChipModel.EMPTY_ROW
             return
         }
         predictionJob?.cancel()
@@ -2089,6 +2127,7 @@ class ComposeKeyboardService : InputMethodService(),
                 kb.panel == ActivePanel.GIF_SEARCH -> kb.panel = ActivePanel.GIF
                 kb.panel == ActivePanel.TRANSLATE && kb.translatorResult.isNotBlank() -> insertTranslation()
                 kb.panel == ActivePanel.AI_PROMPT -> aiTool("send")
+                kb.panel == ActivePanel.SCRIPT_INPUT -> scriptPromptDone(true)
                 else -> performEnter()
             }
             KeyType.SPACER -> Unit
@@ -2242,6 +2281,14 @@ class ComposeKeyboardService : InputMethodService(),
 
     override fun pickSuggestion(chip: SuggestionChipModel) {
         if (chip.isEmpty) return
+        // подсказки, которые показал мод со своим обработчиком: выбор достаётся ему
+        val pick = scriptPick
+        if (pick != null && kb.suggestions === scriptPickRow) {
+            HapticsEngine.keyPress(this, inputView, settings, false)
+            pick(chip.commitWord, kb.suggestions.indexOf(chip).let { listOf(1, 0, 2).getOrElse(it) { it } })
+            return
+        }
+        if (ScriptHost.has("pick") && !flags.isPassword && ScriptHost.cancelled("pick", mapOf("word" to chip.commitWord))) return
         HapticsEngine.keyPress(this, inputView, settings, false)
         // подсказка в переводчике заменяет набираемое там слово
         if (kb.panel == ActivePanel.TRANSLATE) {
@@ -2400,6 +2447,12 @@ class ComposeKeyboardService : InputMethodService(),
         val ic = currentInputConnection ?: return
         finishComposing(ic)
         var t = text.trim()
+        if (t.isEmpty()) return
+        // мод может заменить распознанное (строка) или не вставлять его (false)
+        if (ScriptHost.has("voice")) for (r in ScriptHost.emit("voice", mapOf("text" to t))) {
+            if (r == false) return
+            if (r is String) t = r.trim()
+        }
         if (t.isEmpty()) return
         if (kb.shift != ShiftState.OFF && kb.language.hasCase) t = t.replaceFirstChar { it.uppercase() }
         val before = runCatching { ic.getTextBeforeCursor(1, 0) }.getOrNull()?.lastOrNull()
@@ -2893,7 +2946,11 @@ class ComposeKeyboardService : InputMethodService(),
     }
 
     private fun insertGlideWords(words: List<String>, tapLetter: String? = null) {
-        val best = words.first()
+        var best = words.first()
+        if (ScriptHost.has("glide")) for (r in ScriptHost.emit("glide", mapOf("word" to best, "alternatives" to words))) {
+            if (r == false) return
+            if (r is String && r.isNotBlank()) best = r
+        }
         panelInput?.let { t0 ->
             val t = if (tapLetter != null && t0.endsWith(tapLetter)) t0.dropLast(tapLetter.length) else t0
             panelInput = if (t.isEmpty() || t.endsWith(' ')) t + best else "$t $best"
@@ -3197,16 +3254,137 @@ class ComposeKeyboardService : InputMethodService(),
         runCatching { clipboardManager?.setPrimaryClip(android.content.ClipData.newPlainText("plugin", text)) }
     }
 
-    override fun scriptSuggestions(words: List<String>) {
+    /** Подсказки, которые мод показал со своим обработчиком выбора, и сама эта строка подсказок. */
+    private var scriptPick: ((String, Int) -> Unit)? = null
+    private var scriptPickRow: List<SuggestionChipModel>? = null
+
+    override fun scriptSuggestions(words: List<String>, pick: ((String, Int) -> Unit)?) {
         val w = words.filter { it.isNotBlank() }
-        kb.suggestions = listOf(
+        val row = listOf(
             w.getOrNull(1)?.let { SuggestionChipModel(it, it, isKeepExact = true) } ?: SuggestionChipModel.EMPTY,
             w.getOrNull(0)?.let { SuggestionChipModel(it, it, isPrimary = true, isKeepExact = true) } ?: SuggestionChipModel.EMPTY.copy(isPrimary = true),
             w.getOrNull(2)?.let { SuggestionChipModel(it, it, isKeepExact = true) } ?: SuggestionChipModel.EMPTY
         )
+        kb.suggestions = row
+        scriptPick = pick
+        scriptPickRow = if (pick != null) row else null
     }
 
     override fun scriptHide() = requestHideSelf(0)
+
+    /** Своё «набираемое» слово мода (подчёркнутое, как у обычного набора): так моды делают свои способы ввода. */
+    override fun scriptSetComposing(text: String) {
+        val ic = currentInputConnection ?: return
+        finishComposing(ic)
+        ic.setComposingText(text, 1)
+        expectUnknown()
+    }
+
+    override fun scriptFinishComposing() {
+        val ic = currentInputConnection ?: return
+        finishComposing(ic)
+        ic.finishComposingText()
+        expectUnknown()
+        schedulePredictions()
+    }
+
+    override fun scriptCursor(): List<Int> {
+        val ic = currentInputConnection ?: return emptyList()
+        val et = runCatching { ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0) }.getOrNull() ?: return emptyList()
+        return listOf(et.startOffset + et.selectionStart, et.startOffset + et.selectionEnd)
+    }
+
+    override fun scriptAllText(): String {
+        val ic = currentInputConnection ?: return ""
+        val et = runCatching {
+            ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest().apply { hintMaxChars = 100_000 }, 0)
+        }.getOrNull()
+        et?.text?.let { return it.toString() }
+        return scriptTextBefore(50_000) + scriptSelected() + scriptTextAfter(50_000)
+    }
+
+    override fun scriptReplaceSelection(text: String) {
+        val ic = currentInputConnection ?: return
+        finishComposing(ic)
+        ic.commitText(text, 1)
+        expectUnknown()
+        schedulePredictions()
+    }
+
+    override fun scriptReplaceAll(text: String) {
+        val ic = currentInputConnection ?: return
+        finishComposing(ic)
+        ic.beginBatchEdit()
+        ic.performContextMenuAction(android.R.id.selectAll)
+        ic.commitText(text, 1)
+        ic.endBatchEdit()
+        expectUnknown()
+        schedulePredictions()
+    }
+
+    /** Настоящее нажатие клавиши (с Ctrl, Alt, Shift, Meta): Ctrl+Z, Ctrl+B, F5, стрелки — что поймёт приложение. */
+    override fun scriptSendKey(code: Int, meta: Int) {
+        val ic = currentInputConnection ?: return
+        finishComposing(ic)
+        val now = SystemClock.uptimeMillis()
+        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0, meta))
+        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, code, 0, meta))
+        expectUnknown()
+    }
+
+    override fun scriptEditorAction(name: String) {
+        val ic = currentInputConnection ?: return
+        finishComposing(ic)
+        val action = when (name.lowercase()) {
+            "search" -> EditorInfo.IME_ACTION_SEARCH
+            "send" -> EditorInfo.IME_ACTION_SEND
+            "go" -> EditorInfo.IME_ACTION_GO
+            "next" -> EditorInfo.IME_ACTION_NEXT
+            "previous" -> EditorInfo.IME_ACTION_PREVIOUS
+            else -> EditorInfo.IME_ACTION_DONE
+        }
+        ic.performEditorAction(action)
+    }
+
+    /** Картинка от мода — как картинка из буфера: файлом в папке буфера и через commitContent. */
+    override fun scriptCommitImage(bytes: ByteArray, mime: String): Boolean {
+        val info = currentInputEditorInfo ?: return false
+        val ic = currentInputConnection ?: return false
+        if (EditorInfoCompat.getContentMimeTypes(info).none { ClipDescription.compareMimeTypes(mime, it) }) return false
+        return runCatching {
+            val dir = java.io.File(filesDir, "clips").apply { mkdirs() }
+            dir.listFiles { f -> f.name.startsWith("mod_") && System.currentTimeMillis() - f.lastModified() > 3_600_000L }?.forEach { it.delete() }
+            val ext = mime.substringAfter('/').substringBefore('+').ifEmpty { "png" }
+            val f = java.io.File(dir, "mod_${System.currentTimeMillis()}.$ext")
+            f.writeBytes(bytes)
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
+            val content = InputContentInfoCompat(uri, ClipDescription("image", arrayOf(mime)), null)
+            InputConnectionCompat.commitContent(ic, info, content, InputConnectionCompat.INPUT_CONTENT_GRANT_READ_URI_PERMISSION, null)
+        }.getOrDefault(false)
+    }
+
+    /** Куда вернуться, когда поле ввода мода закроется: на панель мода или к клавиатуре. */
+    private var promptBack = ActivePanel.KEYBOARD
+
+    /** Поле ввода мода: клавиатура печатает в него, пока оно открыто. */
+    override fun scriptPrompt(open: Boolean) {
+        if (open) {
+            if (kb.panel == ActivePanel.VOICE) voice.stop()
+            if (kb.panel != ActivePanel.SCRIPT_INPUT) promptBack = kb.panel
+            kb.symbolsPage = 0
+            kb.panel = ActivePanel.SCRIPT_INPUT
+            kb.toolbarOpen = false
+            schedulePredictions()
+        } else if (kb.panel == ActivePanel.SCRIPT_INPUT) {
+            kb.panel = promptBack
+        }
+    }
+
+    override fun scriptPromptDone(submit: Boolean) {
+        // обработчик мог сразу открыть следующее поле (диалог в несколько шагов) — тогда остаёмся в нём
+        val reopened = if (submit) ScriptHost.promptSubmit() else ScriptHost.promptClosed()
+        if (!reopened && kb.panel == ActivePanel.SCRIPT_INPUT) kb.panel = promptBack
+    }
 
     override fun commitGif(gif: TenorGifResult) {
         HapticsEngine.keyPress(this, inputView, settings, false)
